@@ -76,7 +76,8 @@ jobs:
         if: steps.check.outputs.new_commits != '0'
         id: workflow-diff
         run: |
-          FILES=$(git diff --name-only HEAD..upstream/dev -- .github/workflows/)
+          MERGE_BASE=$(git merge-base HEAD upstream/dev)
+          FILES=$(git diff --name-only "$MERGE_BASE"..upstream/dev -- .github/workflows/)
           if [ -n "$FILES" ]; then
             echo "Workflow files in upstream diff:"
             echo "$FILES" | sed 's|^|  - |'
@@ -215,7 +216,7 @@ jobs:
         run: |
           if [ -z "$TG_TOKEN" ]; then exit 0; fi
           FILE_LIST=$(echo "$WORKFLOW_FILES" | head -10 | sed 's|^|  - |')
-          TEXT="*${TELEGRAM_LABEL} sync*: [WARNING] absorbed upstream changes to \`.github/workflows/*\` -- review recommended:%0A%0A${FILE_LIST}"
+          TEXT=$(printf '*%s sync*: [WARNING] absorbed upstream changes to `.github/workflows/*` -- review recommended:\n\n%s' "$TELEGRAM_LABEL" "$FILE_LIST")
           curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT}" \
             --data-urlencode "parse_mode=Markdown" \
