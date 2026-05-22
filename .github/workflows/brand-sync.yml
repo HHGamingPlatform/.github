@@ -121,6 +121,7 @@ jobs:
 
       - name: Open sync PR on divergence
         if: steps.check.outputs.new_commits != '0' && steps.ff.outputs.ff_clean != 'true' && steps.direct.outputs.direct_push_clean != 'true'
+        id: conflict-pr
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -168,9 +169,11 @@ jobs:
             PR_BODY="${PR_BODY} (Updated $(date -u +%Y-%m-%dT%H:%M:%SZ))"
             gh pr edit "$EXISTING_PR_NUMBER" --repo "${{ github.repository }}" \
               --title "$PR_TITLE" --body "$PR_BODY"
+            echo "pr_action=updated" >> "$GITHUB_OUTPUT"
           else
             gh pr create --repo "${{ github.repository }}" --base dev --head "$BRANCH" \
               --title "$PR_TITLE" --body "$PR_BODY"
+            echo "pr_action=created" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Notify Telegram on success
@@ -198,12 +201,15 @@ jobs:
           TG_TOKEN: ${{ secrets.telegram_bot_token }}
           TG_CHAT: ${{ secrets.telegram_chat_id }}
           TELEGRAM_LABEL: ${{ inputs.telegram_label }}
+          PR_ACTION: ${{ steps.conflict-pr.outputs.pr_action }}
         run: |
           if [ -z "$TG_TOKEN" ]; then exit 0; fi
+          ACTION_WORD="${PR_ACTION:-created}"
+          TEXT=$(printf '*%s sync*: divergence detected. Conflict-resolution PR %s: %s/%s/pulls' "$TELEGRAM_LABEL" "$ACTION_WORD" "${{ github.server_url }}" "${{ github.repository }}")
           curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT}" \
             --data-urlencode "parse_mode=Markdown" \
-            --data-urlencode "text=*${TELEGRAM_LABEL} sync*: divergence detected. Conflict-resolution PR opened: ${{ github.server_url }}/${{ github.repository }}/pulls" \
+            --data-urlencode "text=$TEXT" \
             || true
 
       - name: Notify Telegram on workflow absorption
