@@ -1,0 +1,189 @@
+# Reusable brand-fork sync workflow.
+# Called by HHGamingPlatform/Game.{Auth,Gateway,Replay,Engine,Database}/.github/workflows/sync-from-upstream.yml.
+# Design: docs/wip/design_brand_sync_workflow_reusable_extraction.md
+
+name: Brand sync (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      upstream_repo_short_name:
+        description: Upstream CorePlay repo short name, e.g. Game.Auth
+        required: true
+        type: string
+      telegram_label:
+        description: Label for Telegram messages, e.g. Auth
+        required: true
+        type: string
+    secrets:
+      upstream_read_key:
+        description: SSH deploy key with read access to CorePlay upstream
+        required: true
+      push_pat:
+        description: HH PAT with workflow scope for pushing to dev
+        required: true
+      telegram_bot_token:
+        description: Telegram bot token (optional)
+        required: false
+      telegram_chat_id:
+        description: Telegram chat ID (optional)
+        required: false
+
+jobs:
+  sync:
+    runs-on: [self-hosted, ARM64]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # need full history for merge / cherry-pick
+          ref: dev
+          token: ${{ secrets.push_pat }}
+
+      - name: Configure git identity
+        run: |
+          git config user.email "sync-bot@${{ github.repository_owner }}.local"
+          git config user.name "Brand sync bot"
+
+      - name: Fetch upstream
+        env:
+          DEPLOY_KEY: ${{ secrets.upstream_read_key }}
+          UPSTREAM_REPO_SHORT_NAME: ${{ inputs.upstream_repo_short_name }}
+        run: |
+          KEY_FILE=$(mktemp)
+          KH_FILE=$(mktemp)
+          trap 'rm -f "$KEY_FILE" "$KH_FILE"' EXIT
+
+          chmod 600 "$KEY_FILE"
+          printf '%s\n' "$DEPLOY_KEY" > "$KEY_FILE"
+          ssh-keyscan github.com > "$KH_FILE" 2>/dev/null
+
+          UPSTREAM_REPO="git@github.com:$(printf 'Core%sPlatform/%s.git' 'Play' "$UPSTREAM_REPO_SHORT_NAME")"
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "$UPSTREAM_REPO"
+          GIT_SSH_COMMAND="ssh -i $KEY_FILE -o UserKnownHostsFile=$KH_FILE -o StrictHostKeyChecking=yes" git fetch upstream dev
+
+      - name: Check for new upstream commits
+        id: check
+        run: |
+          NEW=$(git rev-list --count HEAD..upstream/dev)
+          echo "new_commits=$NEW" >> "$GITHUB_OUTPUT"
+          if [ "$NEW" = "0" ]; then
+            echo "Already up to date with upstream/dev"
+          fi
+
+      - name: Try fast-forward merge
+        if: steps.check.outputs.new_commits != '0'
+        id: ff
+        run: |
+          if git merge --ff-only upstream/dev; then
+            echo "ff_clean=true" >> "$GITHUB_OUTPUT"
+            git push origin dev
+            echo "Fast-forward merge complete; pushed to dev"
+          else
+            echo "ff_clean=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Fast-forward not possible; will attempt cherry-pick + PR"
+          fi
+        continue-on-error: true
+
+      - name: Try clean merge direct-push to dev
+        if: steps.check.outputs.new_commits != '0' && steps.ff.outputs.ff_clean != 'true'
+        id: direct
+        run: |
+          if git merge upstream/dev --no-ff --no-edit -m "sync from upstream"; then
+            echo "direct_push_clean=true" >> "$GITHUB_OUTPUT"
+            git push origin dev
+            echo "Clean non-FF merge complete; pushed to dev (no PR opened)"
+          else
+            echo "direct_push_clean=false" >> "$GITHUB_OUTPUT"
+            git merge --abort
+            echo "::warning::Merge conflict on dev; falling through to conflict-PR path"
+          fi
+        continue-on-error: true
+
+      - name: Open sync PR on divergence
+        if: steps.check.outputs.new_commits != '0' && steps.ff.outputs.ff_clean != 'true' && steps.direct.outputs.direct_push_clean != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Reuse the most-recently-updated open sync PR instead of stacking
+          # a new one per run. See design_brand_sync_workflow_pr_reuse_and_align.md section 3 D-1.
+          REUSE_DATA=$(gh pr list --repo "$GITHUB_REPOSITORY" --base dev --state open \
+            --search "head:sync/upstream-" --limit 1 \
+            --json number,headRefName \
+            --jq '.[0] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true)
+          if [ -n "$REUSE_DATA" ]; then
+            EXISTING_PR_NUMBER="${REUSE_DATA%%	*}"
+            BRANCH="${REUSE_DATA##*	}"
+            REUSE_PR=true
+            echo "::notice::Reusing existing sync PR #${EXISTING_PR_NUMBER} (branch ${BRANCH}; force-push update)"
+            git checkout -B "$BRANCH"
+          else
+            BRANCH="sync/upstream-$(date -u +%Y%m%d-%H%M%S)"
+            REUSE_PR=false
+            git checkout -b "$BRANCH"
+          fi
+          # Attempt merge upstream/dev. On clean merge, GitHub PR shows just the diff.
+          # On conflict, commit the markers so PR explicitly flags need for human review.
+          if git merge upstream/dev --no-ff --no-edit -m "sync from upstream"; then
+            MERGE_STATE="clean"
+          else
+            MERGE_STATE="conflict"
+            # Stage conflicted state + commit with marker
+            git add -A
+            git -c user.email=sync-bot@$(echo "${{ github.repository_owner }}" | tr 'A-Z' 'a-z').local -c user.name="Brand sync bot" commit -m "WIP: merge conflicts -- manual resolution needed"
+          fi
+          if [ "$REUSE_PR" = "true" ]; then
+            git push --force-with-lease origin "$BRANCH"
+          else
+            git push origin "$BRANCH"
+          fi
+          DATE=$(date -u +%Y-%m-%d)
+          if [ "$MERGE_STATE" = "clean" ]; then
+            PR_TITLE="Sync from upstream ($DATE)"
+            PR_BODY="Automated upstream framework sync. Merge was clean."
+          else
+            PR_TITLE="Sync from upstream ($DATE) -- MANUAL MERGE NEEDED"
+            PR_BODY="Automated upstream framework sync. Conflicts present; review markers and resolve before merging."
+          fi
+          if [ "$REUSE_PR" = "true" ]; then
+            PR_BODY="${PR_BODY} (Updated $(date -u +%Y-%m-%dT%H:%M:%SZ))"
+            gh pr edit "$EXISTING_PR_NUMBER" --repo "${{ github.repository }}" \
+              --title "$PR_TITLE" --body "$PR_BODY"
+          else
+            gh pr create --repo "${{ github.repository }}" --base dev --head "$BRANCH" \
+              --title "$PR_TITLE" --body "$PR_BODY"
+          fi
+
+      - name: Notify Telegram on success
+        if: success() && steps.check.outputs.new_commits != '0' && (steps.ff.outputs.ff_clean == 'true' || steps.direct.outputs.direct_push_clean == 'true')
+        env:
+          TG_TOKEN: ${{ secrets.telegram_bot_token }}
+          TG_CHAT: ${{ secrets.telegram_chat_id }}
+          TELEGRAM_LABEL: ${{ inputs.telegram_label }}
+        run: |
+          if [ -z "$TG_TOKEN" ]; then exit 0; fi
+          if [ "${{ steps.ff.outputs.ff_clean }}" = "true" ]; then
+            TEXT="*${TELEGRAM_LABEL} sync*: ${{ steps.check.outputs.new_commits }} new upstream commits merged into \`${{ github.repository }}/dev\`."
+          else
+            TEXT="*${TELEGRAM_LABEL} sync*: ${{ steps.check.outputs.new_commits }} new upstream commits auto-merged into \`${{ github.repository }}/dev\` (no PR opened)."
+          fi
+          curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "parse_mode=Markdown" \
+            --data-urlencode "text=$TEXT" \
+            || true
+
+      - name: Notify Telegram on conflict
+        if: success() && steps.check.outputs.new_commits != '0' && steps.ff.outputs.ff_clean != 'true' && steps.direct.outputs.direct_push_clean != 'true'
+        env:
+          TG_TOKEN: ${{ secrets.telegram_bot_token }}
+          TG_CHAT: ${{ secrets.telegram_chat_id }}
+          TELEGRAM_LABEL: ${{ inputs.telegram_label }}
+        run: |
+          if [ -z "$TG_TOKEN" ]; then exit 0; fi
+          curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "parse_mode=Markdown" \
+            --data-urlencode "text=*${TELEGRAM_LABEL} sync*: divergence detected. Conflict-resolution PR opened: ${{ github.server_url }}/${{ github.repository }}/pulls" \
+            || true
