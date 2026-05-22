@@ -216,9 +216,7 @@ jobs:
         run: |
           if [ -z "$TG_TOKEN" ]; then exit 0; fi
           FILE_LIST=$(echo "$WORKFLOW_FILES" | head -10 | sed 's|^|  - |')
-          TEXT="*${TELEGRAM_LABEL} sync*: [WARNING] absorbed upstream changes to \`.github/workflows/*\` -- review recommended:
-
-          ${FILE_LIST}"
+          TEXT=$(printf '*%s sync*: [WARNING] absorbed upstream changes to `.github/workflows/*` -- review recommended:\n\n%s' "$TELEGRAM_LABEL" "$FILE_LIST")
           curl -sS -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT}" \
             --data-urlencode "parse_mode=Markdown" \
