@@ -134,7 +134,7 @@ jobs:
           REUSE_DATA=$(gh pr list --repo "$GITHUB_REPOSITORY" --base dev --state open \
             --search "head:sync/upstream-" --limit 1 \
             --json number,headRefName \
-            --jq '.[0] | "\(.number)\t\(.headRefName)"' 2>/dev/null || true)
+            --jq 'if length > 0 then "\(.[0].number)\t\(.[0].headRefName)" else empty end' 2>/dev/null || true)
           if [ -n "$REUSE_DATA" ]; then
             EXISTING_PR_NUMBER="${REUSE_DATA%%	*}"
             BRANCH="${REUSE_DATA##*	}"
