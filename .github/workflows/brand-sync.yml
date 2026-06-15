@@ -1,5 +1,5 @@
 # Reusable brand-fork sync workflow.
-# Called by HHGamingPlatform/Game.{Auth,Gateway,Replay,Engine,Database}/.github/workflows/sync-from-upstream.yml.
+# Called by brand repos via .github/workflows/sync-from-upstream.yml.
 # Design: docs/wip/design_brand_sync_workflow_reusable_extraction.md
 
 name: Brand sync (reusable)
@@ -8,8 +8,13 @@ on:
   workflow_call:
     inputs:
       upstream_repo_short_name:
-        description: Upstream CorePlay repo short name, e.g. Game.Auth
+        description: Upstream repo short name, e.g. Game.Auth
         required: true
+        type: string
+      upstream_owner:
+        description: Upstream org that owns the source repo (e.g. HHGamingPlatform or CorePlayPlatform)
+        required: false
+        default: CorePlayPlatform
         type: string
       telegram_label:
         description: Label for Telegram messages, e.g. Auth
@@ -17,7 +22,7 @@ on:
         type: string
     secrets:
       upstream_read_key:
-        description: SSH deploy key with read access to CorePlay upstream
+        description: SSH deploy key with read access to upstream
         required: true
       push_pat:
         description: HH PAT with workflow scope for pushing to dev
@@ -53,6 +58,7 @@ jobs:
         env:
           DEPLOY_KEY: ${{ secrets.upstream_read_key }}
           UPSTREAM_REPO_SHORT_NAME: ${{ inputs.upstream_repo_short_name }}
+          UPSTREAM_OWNER: ${{ inputs.upstream_owner }}
         run: |
           KEY_FILE=$(mktemp)
           KH_FILE=$(mktemp)
@@ -62,7 +68,7 @@ jobs:
           printf '%s\n' "$DEPLOY_KEY" > "$KEY_FILE"
           ssh-keyscan github.com > "$KH_FILE" 2>/dev/null
 
-          UPSTREAM_REPO="git@github.com:$(printf 'Core%sPlatform/%s.git' 'Play' "$UPSTREAM_REPO_SHORT_NAME")"
+          UPSTREAM_REPO="git@github.com:${UPSTREAM_OWNER}/${UPSTREAM_REPO_SHORT_NAME}.git"
           git remote remove upstream 2>/dev/null || true
           git remote add upstream "$UPSTREAM_REPO"
           GIT_SSH_COMMAND="ssh -i $KEY_FILE -o UserKnownHostsFile=$KH_FILE -o StrictHostKeyChecking=yes" git fetch upstream dev
